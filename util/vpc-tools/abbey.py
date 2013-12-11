@@ -247,10 +247,6 @@ rm -rf $base_dir
 
     res = ec2.run_instances(**ec2_args)
     sqs_queue.set_message_class(RawMessage)
-#{u'ApproximateFirstReceiveTimestamp': u'1365474374620',
-# u'ApproximateReceiveCount': u'2',
-# u'SenderId': u'419278470775',
-# u'SentTimestamp': u'1365474360357'}
     buf = []
     start_time = int(time.time())
     while True:
