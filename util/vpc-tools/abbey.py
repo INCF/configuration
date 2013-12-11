@@ -245,16 +245,55 @@ rm -rf $base_dir
         'user_data': user_data,
     }
 
-    res = ec2.run_instances(**ec2_args)
+    # res = ec2.run_instances(**ec2_args)
     sqs_queue.set_message_class(RawMessage)
-
+#{u'ApproximateFirstReceiveTimestamp': u'1365474374620',
+# u'ApproximateReceiveCount': u'2',
+# u'SenderId': u'419278470775',
+# u'SentTimestamp': u'1365474360357'}
+    buf = []
+    start_time = int(time.time())
     while True:
-        messages = sqs_queue.get_messages()
-        if not messages:
-            time.sleep(1)
+        messages = []
+        while True:
+            # get all available messages on the queue
+            msgs = sqs_queue.get_messages(attributes='All')
+            if not msgs:
+                break
+            messages.extend(msgs)
+
         for message in messages:
-            print message.get_body()
+            msg_info = {
+                'msg': message.get_body(),
+                'sent_ts': float(message.attributes['SentTimestamp']) * .001,
+                'recv_ts': float(message.attributes['ApproximateFirstReceiveTimestamp']) * .001,
+            }
+            buf.append(msg_info)
             sqs_queue.delete_message(message)
+
+        now = int(time.time())
+        new_buf = []
+        output_buf = []
+        for msg in sorted(buf, key=lambda k: k['sent_ts']):
+            # only display messages that
+            # have been in the buffer for
+            # at least 5 seconds
+            if now - msg['recv_ts'] >= 5:
+                output_buf.append(msg)
+            else:
+                new_buf.append(msg)
+        if output_buf:
+            # print the output buffer
+            print "\n".join([msg['msg'] for msg in sorted(output_buf, key=lambda k: k['sent_ts'])])
+
+        # replace the buffer with
+        # the left over messages
+        buf = new_buf
+
+        if not messages:
+            # wait 1 second between sqs polls
+            time.sleep(1)
+
 
 if __name__ == '__main__':
 
