@@ -245,7 +245,7 @@ rm -rf $base_dir
         'user_data': user_data,
     }
 
-    # res = ec2.run_instances(**ec2_args)
+    res = ec2.run_instances(**ec2_args)
     sqs_queue.set_message_class(RawMessage)
 #{u'ApproximateFirstReceiveTimestamp': u'1365474374620',
 # u'ApproximateReceiveCount': u'2',
