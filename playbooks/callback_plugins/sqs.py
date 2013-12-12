@@ -81,9 +81,8 @@ class CallbackModule(object):
         if not self.enable_sqs:
             return
         from_start = time.time() - self.start_time
-        ts = '{:0>2.0f}:{:0>5.2f}'.format(from_start / 60, from_start % 60)
         payload = {msg_type: msg}
-        payload['TS'] = ts
+        payload['TS'] = from_start
         payload['PREFIX'] = self.prefix
         # update the last seen timestamp for
         # the message type
@@ -94,5 +93,5 @@ class CallbackModule(object):
             if 'TASK' in self.last_seen_ts:
                 from_task = \
                     self.last_seen_ts[msg_type] - self.last_seen_ts['TASK']
-                payload['delta'] = '{:0>3.0f} '.format(from_task)
+                payload['delta'] = from_task
         self.sqs.send_message(self.queue, json.dumps(payload))

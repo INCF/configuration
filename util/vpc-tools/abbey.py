@@ -288,8 +288,9 @@ def poll_sqs():
                 buf.sort(key=lambda k: k['msg']['TS'])
                 to_disp = buf.pop(0)
                 if 'TASK' in to_disp['msg']:
-                    print "\n{} {} : {}".format(
-                        to_disp['msg']['TS'],
+                    print "\n{:0>2.0f}:{:0>5.2f} {} : {}".format(
+                        to_disp['msg']['TS'] / 60,
+                        to_disp['msg']['TS'] % 60,
                         to_disp['msg']['PREFIX'],
                         to_disp['msg']['TASK']),
                 elif 'OK' in to_disp['msg']:
@@ -297,8 +298,12 @@ def poll_sqs():
                         changed = "*OK*"
                     else:
                         changed = "OK"
-                    print " {} ({})".format(
-                        changed, to_disp['msg']['delta']),
+                    if to_disp['msg']['delta'] >= 1:
+                        print " {} ({:0>3})".format(
+                            changed, int(to_disp['msg']['delta'])),
+                    else:
+                        print " {}".format(
+                            changed, int(to_disp['msg']['delta'])),
                     if args.verbose:
                         for key, value in to_disp['msg']['OK'].iteritems():
                             print "    {<15}{}".format(key, value)
@@ -307,8 +312,9 @@ def poll_sqs():
                     for key, value in to_disp['msg']['FAILURE'].iteritems():
                         print "    {<15}{}".format(key, value)
                 elif 'STATS' in to_disp['msg']:
-                    print "\n{} {} : COMPLETE".format(
-                        to_disp['msg']['TS'],
+                    print "\n{:0>2.0f}:{:0>5.2f} {} : COMPLETE".format(
+                        to_disp['msg']['TS'] / 60,
+                        to_disp['msg']['TS'] % 60,
                         to_disp['msg']['PREFIX'])
 
         if not messages:
