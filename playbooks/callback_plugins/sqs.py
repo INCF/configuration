@@ -38,25 +38,38 @@ class CallbackModule(object):
                 self.prefix = os.environ['SQS_MSG_PREFIX'] + ': '
             else:
                 self.prefix = ''
+
+            self.last_seen_ts = {}
         else:
             self.enable_sqs = False
 
+
     def runner_on_failed(self, host, res, ignore_errors=False):
+        if not self.enable_sqs:
+            return
         if not ignore_errors:
             self._send_queue_message(res, 'FAILURE')
 
     def runner_on_ok(self, host, res):
+        if not self.enable_sqs:
+            return
         # don't send the setup results
         if res['invocation']['module_name'] != "setup":
             self._send_queue_message(res, 'OK')
 
     def playbook_on_task_start(self, name, is_conditional):
+        if not self.enable_sqs:
+            return
         self._send_queue_message(name, 'TASK')
 
     def playbook_on_play_start(self, pattern):
+        if not self.enable_sqs:
+            return
         self._send_queue_message(pattern, 'START')
 
     def playbook_on_stats(self, stats):
+        if not self.enable_sqs:
+            return
         d = {}
         delta = time.time() - self.start_time
         d['delta'] = delta
@@ -65,10 +78,20 @@ class CallbackModule(object):
         self._send_queue_message(d, 'STATS')
 
     def _send_queue_message(self, msg, msg_type):
-        delta = time.time() - self.start_time
-        ts = '{:0>2.0f}:{:0>4.1f} '.format(delta / 60, delta % 60)
+        if not self.enable_sqs:
+            return
+        from_start = time.time() - self.start_time
+        ts = '{:0>2.0f}:{:0>4.1f} '.format(from_start / 60, from_start % 60)
         payload = {msg_type: msg}
         payload['TS'] = ts
         payload['PREFIX'] = self.prefix
-        if self.enable_sqs:
-            self.sqs.send_message(self.queue, json.dumps(payload))
+        # update the last seen timestamp for
+        # the message type
+        self.last_seen_ts[msg_type] = time.time()
+        if msg_type in ['OK', 'FAILURE']:
+            if 'TASK' in self.last_seen_ts:
+                from_task = \
+                    self.last_seen_ts[msg_type] - self.last_seen_ts['TASK']
+                payload['delta'] = '{:0>2.0f}:{:0>4.1f} '.format(
+                    from_task / 60, from_task % 60)
+        self.sqs.send_message(self.queue, json.dumps(payload))
