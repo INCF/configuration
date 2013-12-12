@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import json
 try:
     import boto.sqs
     from boto.exception import NoAuthHandlerFound
@@ -40,74 +41,33 @@ class CallbackModule(object):
         else:
             self.enable_sqs = False
 
-    def on_any(self, *args, **kwargs):
-        pass
-
     def runner_on_failed(self, host, res, ignore_errors=False):
         if not ignore_errors:
-            message = "FAILURE: {}".format(host)
-            self._send_queue_message(message)
+            self._send_queue_message(res, 'FAILURE')
 
     def runner_on_ok(self, host, res):
-        pass
-
-    def runner_on_error(self, host, msg):
-        pass
-
-    def runner_on_skipped(self, host, item=None):
-        pass
-
-    def runner_on_unreachable(self, host, res):
-        pass
-
-    def runner_on_no_hosts(self):
-        pass
-
-    def runner_on_async_poll(self, host, res, jid, clock):
-        pass
-
-    def runner_on_async_ok(self, host, res, jid):
-        pass
-
-    def runner_on_async_failed(self, host, res, jid):
-        pass
-
-    def playbook_on_start(self):
-        pass
-
-    def playbook_on_notify(self, host, handler):
-        pass
-
-    def playbook_on_no_hosts_matched(self):
-        pass
-
-    def playbook_on_no_hosts_remaining(self):
-        pass
+        # don't send the setup results
+        if res['invocation']['module_name'] != "setup":
+            self._send_queue_message(res, 'OK')
 
     def playbook_on_task_start(self, name, is_conditional):
-        message = "TASK: {}".format(name)
-        self._send_queue_message(message)
-
-    def playbook_on_setup(self):
-        pass
-
-    def playbook_on_import_for_host(self, host, imported_file):
-        pass
-
-    def playbook_on_not_import_for_host(self, host, missing_file):
-        pass
+        self._send_queue_message(name, 'TASK')
 
     def playbook_on_play_start(self, pattern):
-        pass
-        message = "Starting play {}".format(pattern)
-        self._send_queue_message(message)
+        self._send_queue_message(pattern, 'START')
 
     def playbook_on_stats(self, stats):
-        pass
+        d = {}
+        delta = time.time() - self.start_time
+        d['delta'] = delta
+        for s in ['changed', 'failures', 'ok', 'processed', 'skipped']:
+            d[s] = getattr(stats, s)
+        self._send_queue_message(d, 'STATS')
 
-    def _send_queue_message(self, message):
+    def _send_queue_message(self, msg, msg_type):
         delta = time.time() - self.start_time
         ts = '{:0>2.0f}:{:0>4.1f} '.format(delta / 60, delta % 60)
+        msg['TS'] = ts
+        msg['PREFIX'] = self.prefix
         if self.enable_sqs:
-            self.sqs.send_message(self.queue, ts + self.prefix +
-                                  message.encode('utf-8'))
+            self.sqs.send_message(json.dumps(msg))
