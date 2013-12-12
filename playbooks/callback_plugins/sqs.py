@@ -89,9 +89,10 @@ class CallbackModule(object):
         # the message type
         self.last_seen_ts[msg_type] = time.time()
         if msg_type in ['OK', 'FAILURE']:
+            # report the delta between the OK/FAILURE and
+            # last TASK
             if 'TASK' in self.last_seen_ts:
                 from_task = \
                     self.last_seen_ts[msg_type] - self.last_seen_ts['TASK']
-                payload['delta'] = '{:0>2.0f}:{:0>4.1f} '.format(
-                    from_task / 60, from_task % 60)
+                payload['delta'] = '{:0>3.0f} '.format(from_task)
         self.sqs.send_message(self.queue, json.dumps(payload))
