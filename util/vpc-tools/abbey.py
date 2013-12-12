@@ -1,11 +1,9 @@
-#!/usr/bin/env python
+#!/usr/bin/env python -u
 
 import sys
 from argparse import ArgumentParser
-import subprocess
 import time
-from base64 import encodestring
-
+import json
 try:
     import boto.ec2
     import boto.sqs
@@ -16,20 +14,16 @@ except ImportError:
     print "boto required for script"
     sys.exit(1)
 
+class Unbuffered:
+   def __init__(self, stream):
+       self.stream = stream
+   def write(self, data):
+       self.stream.write(data)
+       self.stream.flush()
+   def __getattr__(self, attr):
+       return getattr(self.stream, attr)
 
-def run_cmd(cmd):
-    if args.noop:
-        sys.stderr.write('would have run: {}\n\n'.format(cmd))
-    else:
-        sys.stderr.write('running: {}\n'.format(cmd))
-        process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            shell=True)
-        # don't buffer output
-        for line in iter(process.stdout.readline, ""):
-            sys.stderr.write(line)
-            sys.stderr.flush()
-
+sys.stdout=Unbuffered(sys.stdout)
 
 def parse_args():
     parser = ArgumentParser()
@@ -52,7 +46,9 @@ def parse_args():
                         required=True)
     parser.add_argument('-e', '--environment', metavar="ENVIRONMENT",
                         required=True)
-    parser.add_argument('-v', '--vars', metavar="EXTRA_VAR_FILE",
+    parser.add_argument('-v', '--verbose',
+                        help="turn on verbosity", required=False)
+    parser.add_argument('--vars', metavar="EXTRA_VAR_FILE",
                         help="path to extra var file", required=False)
     parser.add_argument('-a', '--application', required=False,
                         help="Application for subnet, defaults to admin",
@@ -86,20 +82,16 @@ def parse_args():
     parser.add_argument("--role-name", required=False,
                         default="abbey",
                         help="IAM role name to use (must exist)")
+    parser.add_argument("--msg-delay", required=False,
+                        default=5,
+                        help="How long to delay message display from sqs "
+                             "to ensure ordering")
     return parser.parse_args()
 
 
-def main():
+def create_instance_args():
 
     security_group_id = None
-    queue_name = "abbey-{}-{}".format(args.environment, args.deployment)
-
-    try:
-        sqs = boto.sqs.connect_to_region(args.region)
-        ec2 = boto.ec2.connect_to_region(args.region)
-    except NoAuthHandlerFound:
-        print 'You must be able to connect to sqs and ec2 to use this script'
-        sys.exit(1)
 
     grp_details = ec2.get_all_security_groups()
 
@@ -141,10 +133,6 @@ def main():
         config_secure = 'false'
         identity_file = "dummy"
 
-    # create the queue we will be listening on
-    # in case it doesn't exist
-    sqs_queue = sqs.create_queue(queue_name)
-
     user_data = """#!/bin/bash
 set -x
 set -e
@@ -159,9 +147,17 @@ environment="{environment}"
 deployment="{deployment}"
 play="{play}"
 config_secure={config_secure}
-instance_id=$(curl http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
-instance_ip=$(curl http://169.254.169.254/latest/meta-data/local-ipv4 2>/dev/null)
-instance_type=$(curl http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null)
+secure_vars_file="$base_dir/configuration-secure\\
+/ansible/vars/$environment/$environment-$deployment.yml"
+instance_id=\\
+$(curl http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+instance_ip=\\
+$(curl http://169.254.169.254/latest/meta-data/local-ipv4 2>/dev/null)
+instance_type=\\
+$(curl http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null)
+playbook_dir="$base_dir/configuration/playbooks/edx-east"
+git_repo="https://github.com/edx/configuration"
+git_repo_secure="git@github.com:edx/configuration-secure"
 
 if $config_secure; then
     git_cmd="env GIT_SSH=$git_ssh git"
@@ -181,7 +177,9 @@ export ANSIBLE_ENABLE_SQS SQS_NAME SQS_REGION SQS_MSG_PREFIX PYTHONUNBUFFERED
 if [[ ! -x /usr/bin/git || ! -x /usr/bin/pip ]]; then
     echo "Installing pkg dependencies"
     /usr/bin/apt-get update
-    /usr/bin/apt-get install -y git python-pip python-apt git-core build-essential python-dev libxml2-dev libxslt-dev curl --force-yes
+    /usr/bin/apt-get install -y git python-pip python-apt \\
+        git-core build-essential python-dev libxml2-dev \\
+        libxslt-dev curl --force-yes
 fi
 
 
@@ -204,22 +202,24 @@ fi
 
 cat << EOF >> $extra_vars
 ---
-secure_vars: "$base_dir/configuration-secure/ansible/vars/$environment/$environment-$deployment.yml"
+secure_vars: $secure_vars_file
 edx_platform_commit: master
+xqueue_create_db: 'no'
 EOF
 
 chmod 400 $secure_identity
 
-$git_cmd clone -b $configuration_version https://github.com/edx/configuration
+$git_cmd clone -b $configuration_version $git_repo
 
 if $config_secure; then
-    $git_cmd clone -b $configuration_secure_version git@github.com:edx/configuration-secure
+    $git_cmd clone -b $configuration_secure_version \\
+        $git_repo_secure
 fi
 
 cd $base_dir/configuration
 sudo pip install -r requirements.txt
 
-cd $base_dir/configuration/playbooks/edx-east
+cd $playbook_dir
 
 ansible-playbook -vvvv -c local -i "localhost," $play.yml -e@$extra_vars
 
@@ -245,10 +245,12 @@ rm -rf $base_dir
         'user_data': user_data,
     }
 
-    res = ec2.run_instances(**ec2_args)
-    sqs_queue.set_message_class(RawMessage)
+    return ec2_args
+
+
+def poll_sqs():
+    oldest_msg_ts = 0
     buf = []
-    start_time = int(time.time())
     while True:
         messages = []
         while True:
@@ -259,36 +261,92 @@ rm -rf $base_dir
             messages.extend(msgs)
 
         for message in messages:
-            msg_info = {
-                'msg': message.get_body(),
-                'sent_ts': float(message.attributes['SentTimestamp']) * .001,
-                'recv_ts': float(message.attributes['ApproximateFirstReceiveTimestamp']) * .001,
-            }
-            buf.append(msg_info)
+            recv_ts = float(
+                message.attributes['ApproximateFirstReceiveTimestamp']) * .001
+            sent_ts = float(message.attributes['SentTimestamp']) * .001
+            try:
+                msg_info = {
+                    'msg': json.loads(message.get_body()),
+                    'sent_ts': sent_ts,
+                    'recv_ts': recv_ts,
+                }
+                buf.append(msg_info)
+            except ValueError as e:
+                print "!!! ERROR !!! unable to parse queue message, " \
+                      "expecting valid json: {} : {}".format(
+                          message.get_body(), e)
+            if not oldest_msg_ts or recv_ts < oldest_msg_ts:
+                oldest_msg_ts = recv_ts
             sqs_queue.delete_message(message)
 
         now = int(time.time())
-        new_buf = []
-        output_buf = []
-        for msg in sorted(buf, key=lambda k: k['sent_ts']):
-            # only display messages that
-            # have been in the buffer for
-            # at least 5 seconds
-            if now - msg['recv_ts'] >= 5:
-                output_buf.append(msg)
-            else:
-                new_buf.append(msg)
-        if output_buf:
-            # print the output buffer
-            print "\n".join([msg['msg'] for msg in sorted(output_buf, key=lambda k: k['sent_ts'])])
-
-        # replace the buffer with
-        # the left over messages
-        buf = new_buf
+        if buf:
+            if (now - max([msg['recv_ts'] for msg in buf])) > args.msg_delay:
+                # sort by TS instead of recv_ts
+                # because the sqs timestamp is not as
+                # accurate
+                buf.sort(key=lambda k: k['msg']['TS'])
+                to_disp = buf.pop(0)
+                if 'TASK' in to_disp['msg']:
+                    print "\n{} {} : {}".format(
+                        to_disp['msg']['TS'],
+                        to_disp['msg']['PREFIX'],
+                        to_disp['msg']['TASK']),
+                elif 'OK' in to_disp['msg']:
+                    if to_disp['msg']['OK']['changed']:
+                        changed = "*OK*"
+                    else:
+                        changed = "OK"
+                    print " {} ({})".format(
+                        changed, to_disp['msg']['delta']),
+                    if args.verbose:
+                        for key, value in to_disp['msg']['OK'].iteritems():
+                            print "    {<15}{}".format(key, value)
+                elif 'FAILURE' in to_disp['msg']:
+                    print " !!!! FAILURE !!!!",
+                    for key, value in to_disp['msg']['FAILURE'].iteritems():
+                        print "    {<15}{}".format(key, value)
+                elif 'STATS' in to_disp['msg']:
+                    print "\n{} {} : COMPLETE".format(
+                        to_disp['msg']['TS'],
+                        to_disp['msg']['PREFIX'])
 
         if not messages:
             # wait 1 second between sqs polls
             time.sleep(1)
+
+#def create_ami(instance_id, name, description):
+#    params = {'instance_id': instance_id,
+#              'name': name,
+#              'description': description,
+#              'no_reboot': True}
+#
+#    image_id = ec2.create_image(**params)
+#
+#    for i in range(30):
+#        try:
+#            img = ec2.get_image(image_id)
+#            break
+#        except boto.exception.EC2ResponseError as e:
+#            if e.error_code == 'InvalidAMIID.NotFound':
+#                time.sleep(1)
+#            else:
+#                raise
+#    else:
+#        module.fail_json(msg = "timed out waiting for image to be recognized")
+#
+#    # wait here until the image is created
+#    wait_timeout = time.time() + wait_timeout
+#    while wait and wait_timeout > time.time() and (img is None or img.state != 'available'):
+#        img = ec2.get_image(image_id)
+#        time.sleep(3)
+#    if wait and wait_timeout <= time.time():
+#        # waiting took too long
+#        module.fail_json(msg = "timed out waiting for image to be created")
+#
+#    module.exit_json(msg="AMI creation operation complete", image_id=image_id, state=img.state, changed=True)
+#    sys.exit(0)
+#
 
 
 if __name__ == '__main__':
@@ -304,4 +362,36 @@ if __name__ == '__main__':
         stack_name = args.stack_name
     else:
         stack_name = "{}-{}".format(args.environment, args.deployment)
-    main()
+
+    try:
+        sqs = boto.sqs.connect_to_region(args.region)
+        ec2 = boto.ec2.connect_to_region(args.region)
+    except NoAuthHandlerFound:
+        print 'You must be able to connect to sqs and ec2 to use this script'
+        sys.exit(1)
+
+    try:
+        sqs_queue = None
+        queue_name = "abbey-{}-{}-{}".format(
+            args.environment, args.deployment, int(time.time() * 100))
+
+        # create the queue we will be listening on
+        # in case it doesn't exist
+        sqs_queue = sqs.create_queue(queue_name)
+        sqs_queue.set_message_class(RawMessage)
+
+        instance_id = None
+        ec2_args = create_instance_args()
+        res = ec2.run_instances(**ec2_args)
+        instance_id = res.instances[0].id
+
+        poll_sqs()
+
+    except (KeyboardInterrupt, Exception) as e:
+        if sqs_queue:
+            print "Removing queue - {}".format(queue_name)
+            sqs.delete_queue(sqs_queue)
+        if instance_id:
+            print "Terminating instance ID - {}".format(instance_id)
+            ec2.terminate_instances(instance_ids=[instance_id])
+        raise e
