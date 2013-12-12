@@ -71,4 +71,4 @@ class CallbackModule(object):
         payload['TS'] = ts
         payload['PREFIX'] = self.prefix
         if self.enable_sqs:
-            self.sqs.send_message(json.dumps(payload))
+            self.sqs.send_message(self.queue, json.dumps(payload))
