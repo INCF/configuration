@@ -67,7 +67,8 @@ class CallbackModule(object):
     def _send_queue_message(self, msg, msg_type):
         delta = time.time() - self.start_time
         ts = '{:0>2.0f}:{:0>4.1f} '.format(delta / 60, delta % 60)
-        msg['TS'] = ts
-        msg['PREFIX'] = self.prefix
+        payload = {msg_type: msg}
+        payload['TS'] = ts
+        payload['PREFIX'] = self.prefix
         if self.enable_sqs:
-            self.sqs.send_message(json.dumps(msg))
+            self.sqs.send_message(json.dumps(payload))
